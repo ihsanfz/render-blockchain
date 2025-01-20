@@ -1,1 +1,2 @@
-Hackathon project
+Scoot Hackathon project
+
