@@ -1,103 +1,103 @@
-import aioipfs, asyncio, os, shutil
+import asyncio
+import aioipfs
 from web3 import Web3
-import bpy
-POLYGON_RPC_URL = "https://polygon-amoy.g.alchemy.com/v2/Tfy521pE2Li_shPTc9AgvPnYb_sj_Mwl"
+from web3.middleware import ExtraDataToPOAMiddleware
+import httpx
+import requests
 
-CONTRACT_ADDRESS = "0xA639edfC96c4535a4a08534d6E890CceCb60C657"
+# Connect to the blockchain (e.g., Polygon)
+POLYGON_RPC_URL = ""  # Replace with your RPC URL
+web3 = Web3(Web3.HTTPProvider(POLYGON_RPC_URL))
+
+# Inject PoA middleware
+web3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+
+# Verify the connection
+if web3.is_connected():
+    print("Connected to the blockchain!")
+else:
+    print("Failed to connect to the blockchain.")
+
+# Smart contract details (replace with your deployed contract address and ABI)
+CONTRACT_ADDRESS = ""
+with open(r'contract_abi.json', 'r') as file:
+    CONTRACT_ABI = file.read()  # Replace with your contract's ABI
+
+# Load the contract
+contract = web3.eth.contract(address=CONTRACT_ADDRESS, abi=CONTRACT_ABI)
+
+# Your wallet address and private key (for signing transactions)
+WALLET_ADDRESS = ""
 PRIVATE_KEY = ""
 
-w3 = Web3(Web3.HTTPProvider(POLYGON_RPC_URL))
+async def upload_file_to_ipfs(file_path):
+    # Connect to the local IPFS node
+    client = aioipfs.AsyncIPFS(host='127.0.0.1', port=5001) #Connect to IPFS hosted on client
 
-with open(r'C:\Users\moaha\Downloads\hackathon\new\contract_abi.json', 'r') as file:
-    contract_abi = file.read()
+    # Initialize CID to None
+    cid = None
 
-contract = w3.eth.contract(address=Web3.to_checksum_address(CONTRACT_ADDRESS), abi=contract_abi)
+    # Upload the file to IPFS
+    async for added_file in client.add(file_path):
+        cid = added_file['Hash']
+        print(f"File uploaded to IPFS. CID: {cid}")
 
+    # Close the IPFS client connection
+    await client.close()
 
-async def upload_to_ipfs(file_path):
-    client = aioipfs.AsyncIPFS(maddr='/dns4/localhost/tcp/5001')
-    async for added in client.core.add(file_path):
-        return added['Hash']
+    # Check if CID was assigned
+    if cid is None:
+        raise Exception("Failed to upload file to IPFS: No CID returned.")
 
-def send_to_blockchain(ipfs_hash, file_name):
-    try:
-        account = w3.eth.account.from_key(PRIVATE_KEY)
-        nonce = w3.eth.get_transaction_count(account.address)
+    return cid
 
-        txn = contract.functions.storeFile(ipfs_hash, file_name).build_transaction({
-            'from': account.address,
-            'nonce': nonce,
-            'gas': contract.functions.storeFile(ipfs_hash, file_name).estimate_gas({
-            'from': account.address
-        }),
-        'gasPrice': w3.to_wei('25', 'gwei')
+async def store_metadata_on_blockchain(cid, client_info):
+    # Create the transaction
+    transaction = contract.functions.storeFile(cid, client_info).build_transaction({
+        'from': WALLET_ADDRESS,
+        'gas': 2000000,
+        'nonce': web3.eth.get_transaction_count(WALLET_ADDRESS),
     })
-        signed_txn = w3.eth.account.sign_transaction(txn, PRIVATE_KEY)
-        tx_hash = w3.eth.send_raw_transaction(signed_txn.raw_transaction)
-        return tx_hash
-    except:
-        print("Exception handled")
 
-async def download_from_ipfs(ipfs_hash, file_name):
-    async with aioipfs.AsyncIPFS() as client:
+    # Sign the transaction
+    signed_txn = web3.eth.account.sign_transaction(transaction, private_key=PRIVATE_KEY)
+
+    # Send the transaction
+    tx_hash = web3.eth.send_raw_transaction(signed_txn.raw_transaction)
+    receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+    print(f"File metadata stored on blockchain. Transaction hash: {tx_hash.hex()}")
+
+async def send_cid_to_host(cid, host_url):
+    async with httpx.AsyncClient(timeout=5) as client:
         try:
-            temp_dir = os.path.join(os.getcwd(), "temp_ipfs_download")
-            os.makedirs(temp_dir, exist_ok=True)
-            
-            await client.get(ipfs_hash, dstdir=temp_dir)
-            print("File downloaded successfully.")
-            
-            downloaded_files = os.listdir(temp_dir)
-            if not downloaded_files:
-                raise Exception("No files were downloaded from IPFS")
-            
-            downloaded_file = os.path.join(temp_dir, downloaded_files[0])
-            
-            if os.path.isdir(downloaded_file):
-                inner_files = os.listdir(downloaded_file)
-                if not inner_files:
-                    raise Exception("Downloaded directory is empty")
-                downloaded_file = os.path.join(downloaded_file, inner_files[0])
-            
-            final_path = os.path.join(os.getcwd(), file_name)
-            
-            shutil.move(downloaded_file, final_path)
-            
-            shutil.rmtree(temp_dir)
-            print(f"File saved as: {final_path}")
-        except aioipfs.APIError as e:
-            print(f"Error downloading file from IPFS: {e}")
+            # Send the CID to the host
+            response = requests.post('http://<host_ip>:5000/receive_file', json={'cid': cid})
+            if response.status_code == 200:
+                print("CID sent successfully. Waiting for rendered image...")
+
+                # Save the rendered image
+                with open('rendered_image.png', 'wb') as img_file:
+                    img_file.write(response.content)
+                print("Rendered image received and saved as 'rendered_image.png'.")
+            else:
+                print(f"Failed to send CID. Status code: {response.status_code}")
+                print(f"Response content: {response.text}")  # Debugging: Print the response content
         except Exception as e:
-            print(f"Unexpected error: {e}")
+            print(f"An error occurred while sending CID: {e}")
 
+async def main():
+    blender_file_path = "stuff.blend"  # Path to the Blender file
+    host_url = "http://<host_ip>:5000"  # Host server URL
+    client_info = "Client1"  # Replace with client info
 
-def get_ipfs_hash_from_blockchain():
-    ipfs_hash, file_name = contract.functions.getFile().call()
-    print(f"IPFS hash retrieved from blockchain: {ipfs_hash} {file_name}")
-    return ipfs_hash, file_name
+    # Upload the file to IPFS and get the CID
+    cid = await upload_file_to_ipfs(blender_file_path)
+
+    # Store the CID and metadata on the blockchain
+    await store_metadata_on_blockchain(cid, client_info)
+
+    # Send the CID to the host
+    await send_cid_to_host(cid, host_url)
 
 if __name__ == "__main__":
-    ipfs_hash, file_name = get_ipfs_hash_from_blockchain()
-    
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(download_from_ipfs(ipfs_hash, file_name))
-
-    bpy.ops.wm.open_mainfile(filepath='untitled.blend')
-    bpy.context.scene.render.engine = 'BLENDER_EEVEE_NEXT'
-    scene = bpy.context.scene
-    scene.render.image_settings.file_format = 'PNG'
-    scene.render.filepath = os.getcwd() + "/render.png"
-    bpy.ops.render.render(write_still=True)
-
-    file_path = os.getcwd() + "/render.png"
-    ipfs_hash = loop.run_until_complete(upload_to_ipfs(file_path))
-    file_name = os.path.basename(file_path)
-    # loop.close()
-    print(f"Uploaded to IPFS with hash: {ipfs_hash}")
-    
-    tx_hash = send_to_blockchain(ipfs_hash, file_name)
-    print(f"Stored IPFS hash on blockchain in transaction: {tx_hash}")
-    
-        # Send the new IPFS hash back to the host
-    loop.close()
+    asyncio.run(main())

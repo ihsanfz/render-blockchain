@@ -1,14 +1,39 @@
 [
 	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": false,
+				"internalType": "string",
+				"name": "cid",
+				"type": "string"
+			},
+			{
+				"indexed": false,
+				"internalType": "string",
+				"name": "client",
+				"type": "string"
+			},
+			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "timestamp",
+				"type": "uint256"
+			}
+		],
+		"name": "FileUploaded",
+		"type": "event"
+	},
+	{
 		"inputs": [
 			{
 				"internalType": "string",
-				"name": "_ipfsHash",
+				"name": "_cid",
 				"type": "string"
 			},
 			{
 				"internalType": "string",
-				"name": "_fileName",
+				"name": "_client",
 				"type": "string"
 			}
 		],
@@ -18,25 +43,42 @@
 		"type": "function"
 	},
 	{
-		"inputs": [],
+		"inputs": [
+			{
+				"internalType": "string",
+				"name": "",
+				"type": "string"
+			}
+		],
 		"name": "files",
 		"outputs": [
 			{
 				"internalType": "string",
-				"name": "ipfsHash",
+				"name": "cid",
 				"type": "string"
 			},
 			{
 				"internalType": "string",
-				"name": "fileName",
+				"name": "client",
 				"type": "string"
+			},
+			{
+				"internalType": "uint256",
+				"name": "timestamp",
+				"type": "uint256"
 			}
 		],
 		"stateMutability": "view",
 		"type": "function"
 	},
 	{
-		"inputs": [],
+		"inputs": [
+			{
+				"internalType": "string",
+				"name": "_cid",
+				"type": "string"
+			}
+		],
 		"name": "getFile",
 		"outputs": [
 			{
@@ -48,6 +90,11 @@
 				"internalType": "string",
 				"name": "",
 				"type": "string"
+			},
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
 			}
 		],
 		"stateMutability": "view",

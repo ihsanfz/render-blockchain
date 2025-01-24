@@ -1,97 +1,124 @@
+from flask import Flask, request, send_file
+import subprocess
+import os
 import aioipfs
 import asyncio
-import os
-from aiohttp import web
 from web3 import Web3
+from web3.middleware import ExtraDataToPOAMiddleware
+import logging
 
-# Polygon RPC URL (Infura, Alchemy, or own node)
-POLYGON_RPC_URL = "https://polygon-amoy.g.alchemy.com/v2/Tfy521pE2Li_shPTc9AgvPnYb_sj_Mwl"
+app = Flask(__name__)
 
-# Smart contract address
-CONTRACT_ADDRESS = "0xA639edfC96c4535a4a08534d6E890CceCb60C657"
-# Host's private key (keep this secure in production)
-PRIVATE_KEY = ""
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
-# Initialize Web3 connection
-w3 = Web3(Web3.HTTPProvider(POLYGON_RPC_URL))
+# Connect to the blockchain (e.g., Polygon)
+POLYGON_RPC_URL = ""  # Replace with your RPC URL
+web3 = Web3(Web3.HTTPProvider(POLYGON_RPC_URL))
 
-# Load your contract ABI
-with open(r'/home/ihsan/Documents/Projects/Hackathon/distributedRender/contract_abi.json', 'r') as file:
-    contract_abi = file.read()
+# Inject PoA middleware
+web3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
-contract = w3.eth.contract(address=Web3.to_checksum_address(CONTRACT_ADDRESS), abi=contract_abi)
+# Verify the connection
+if web3.is_connected():
+    logger.info("Connected to the blockchain!")
+else:
+    logger.error("Failed to connect to the blockchain.")
 
-# Upload file to IPFS
-async def upload_to_ipfs(file_path):
-    client = aioipfs.AsyncIPFS(maddr='/dns4/localhost/tcp/5001')
-    async for added in client.core.add(file_path):
-        return added['Hash']
+# Smart contract details (replace with your deployed contract address and ABI)
+CONTRACT_ADDRESS = ""
+with open(r'.\contract_abi.json', 'r') as file:
+    CONTRACT_ABI = file.read()  # Replace with your contract's ABI
 
-# Function to send transaction to the blockchain
-def send_to_blockchain(ipfs_hash, file_name):
+# Load the contract
+contract = web3.eth.contract(address=CONTRACT_ADDRESS, abi=CONTRACT_ABI)
+
+# Render the Blender file (synchronous)
+def render_blender_file(file_path):
+    # Ensure the output directory is the same as the script's directory
+    script_directory = os.path.dirname(os.path.abspath(__file__))
+    output_image = os.path.join(script_directory, "output.png")
+
+    # Blender command to render the file
+    blender_command = [
+        "blender",  # Path to Blender executable
+        "-b", file_path,  # Run in background mode
+        "-o", output_image,  # Output image path (without frame number)
+        "-F", "PNG",  # Output format
+        "-x", "1",  # Overwrite existing files
+        "-f", "1",  # Render frame 1
+    ]
+    subprocess.run(blender_command)
+
+    # Blender appends a frame number to the output file, so we need to rename it
+    rendered_file = f"{output_image}0001.png"
+    if os.path.exists(rendered_file):
+        os.rename(rendered_file, output_image)
+
+    return output_image
+
+# Asynchronous function to retrieve a file from IPFS
+async def retrieve_file_from_ipfs(cid):
+    # Connect to the client's IPFS node
+    client = aioipfs.AsyncIPFS(host='<client_ip>', port=5001)  # Replace with client's IP
+
     try:
-        account = w3.eth.account.from_key(PRIVATE_KEY)
-        nonce = w3.eth.get_transaction_count(account.address)
+        # Retrieve the file from IPFS
+        file_data = await client.cat(cid)
+        return file_data
+    finally:
+        # Close the IPFS client connection
+        await client.close()
 
-        # Build transaction
-        txn = contract.functions.storeFile(ipfs_hash, file_name).build_transaction({
-            'from': account.address,
-            'nonce': nonce,
-            'gas': contract.functions.storeFile(ipfs_hash, file_name).estimate_gas({
-                'from': account.address
-            }),
-            'gasPrice': w3.to_wei('25', 'gwei')
-        })
-        # Sign the transaction
-        signed_txn = w3.eth.account.sign_transaction(txn, PRIVATE_KEY)
-        # Send the transaction
-        tx_hash = w3.eth.send_raw_transaction(signed_txn.raw_transaction)
-        return tx_hash
+@app.route('/receive_file', methods=['POST'])
+def receive_file():
+    try:
+        logger.debug("Received request to /receive_file")
+
+        if 'cid' not in request.json:
+            logger.error("No CID provided in the request")
+            return "No CID provided", 400
+
+        cid = request.json['cid']
+        logger.debug(f"CID received: {cid}")
+
+        # Validate the CID
+        if not cid or not isinstance(cid, str):
+            logger.error(f"Invalid CID provided: {cid}")
+            return "Invalid CID provided.", 400
+
+        # Verify the CID against the blockchain
+        logger.debug("Verifying CID against the blockchain...")
+        stored_cid, client_info, timestamp = contract.functions.getFile(cid).call()
+        if stored_cid != cid:
+            logger.error(f"CID does not match the blockchain record. Stored CID: {stored_cid}, Received CID: {cid}")
+            return "CID does not match the blockchain record.", 400
+
+        # Run the async function to retrieve the file
+        logger.debug("Retrieving file from IPFS...")
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        file_data = loop.run_until_complete(retrieve_file_from_ipfs(cid))
+
+        # Save the file locally
+        file_path = "received_project.blend"
+        with open(file_path, 'wb') as f:
+            f.write(file_data)
+        logger.debug(f"File saved locally at: {file_path}")
+
+        # Render the Blender file
+        logger.debug("Rendering Blender file...")
+        output_image = render_blender_file(file_path)
+
+        # Send the rendered image back to the client
+        logger.debug("Sending rendered image back to the client...")
+        return send_file(output_image, mimetype='image/png')
+
     except Exception as e:
-        # Handle blockchain or IPFS errors gracefully and log them
-        print(f"")
-        return None  # Still return None to continue the process
+        logger.error(f"An error occurred: {str(e)}", exc_info=True)
+        return f"An error occurred: {str(e)}", 500
 
-# Route to handle file upload
-async def handle_file_upload(request):
-    reader = await request.multipart()
-    file = await reader.next()
-    
-    # Save the file locally
-    file_path = os.path.join("/tmp", file.filename)
-    with open(file_path, 'wb') as f:
-        while True:
-            chunk = await file.read_chunk()
-            if not chunk:
-                break
-            f.write(chunk)
-    
-    # Upload the file to IPFS
-    ipfs_hash = await upload_to_ipfs(file_path)
-    file_name = os.path.basename(file_path)
-
-    # Store the IPFS hash on the blockchain
-    tx_hash = send_to_blockchain(ipfs_hash, file_name)
-    
-    # Delete the file after processing
-    os.remove(file_path)
-
-    if tx_hash:
-        return web.json_response({
-            "ipfsHash": ipfs_hash,
-            "transactionHash": tx_hash.hex(),
-            "message": "File successfully uploaded and stored on the blockchain."
-        })
-    else:
-        return web.json_response({
-            "message": "An error occurred while storing the hash on the blockchain."
-        }, status=500)
-
-# Create the web application
-app = web.Application()
-app.router.add_post('/upload', handle_file_upload)
-
-# Start the aiohttp server
 if __name__ == "__main__":
-    web.run_app(app, host='0.0.0.0', port=8000)
-
+    # Start the Flask server
+    app.run(host="0.0.0.0", port=5000)
